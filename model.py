@@ -9,12 +9,11 @@ from torch.nn.parallel import DistributedDataParallel
 from torch.distributed import init_process_group, destroy_process_group, is_initialized
 
 import os
+import argparse
 
 
 # Constants
-batch_size = 32
 block_size = 26  # length of the Time dimension or context
-learning_rate = 1e-3
 n_embd = 24
 num_heads = 4  # head_size is n_embed // num_heads
 n_layers = 6  # how many layers of multi headed attention + feedforward networks to use
@@ -178,7 +177,14 @@ class LanguageModel(nn.Module):
         return x
 
 
-def train(local_rank, global_rank):
+def train(local_rank, global_rank, checkpoint_dir, batch_size, learning_rate):
+    # Ensure the checkpoint directory exists (only rank 0 needs to create it)
+    if global_rank == 0 and not os.path.exists(checkpoint_dir):
+        os.makedirs(checkpoint_dir)
+
+    # Construct the full checkpoint path
+    checkpoint_path = os.path.join(checkpoint_dir, "latest_checkpoint.pth")
+
     # Setup datasets and dataloaders
     train_dataset = CharDataset(train_data, block_size)
     val_dataset = CharDataset(val_data, block_size)
@@ -187,7 +193,7 @@ def train(local_rank, global_rank):
     train_sampler = DistributedSampler(train_dataset, shuffle=True)
     val_sampler = DistributedSampler(val_dataset, shuffle=False)
 
-    # Use DataLoader
+    # Use DataLoader with the passed batch_size
     train_loader = DataLoader(
         train_dataset, batch_size=batch_size, sampler=train_sampler, pin_memory=True
     )
@@ -197,10 +203,10 @@ def train(local_rank, global_rank):
 
     model = LanguageModel()
     map_location = {"cuda:%d" % 0: "cuda:%d" % local_rank}
-    if os.path.exists("latest_checkpoint.pth"):  # Load latest checkpoint
-        print(f"Rank {global_rank}: Loading checkpoint...")
+    if os.path.exists(checkpoint_path):  # Use the full path
+        print(f"Rank {global_rank}: Loading checkpoint from {checkpoint_path}...")
         model.load_state_dict(
-            torch.load("latest_checkpoint.pth", map_location=map_location)
+            torch.load(checkpoint_path, map_location=map_location)  # Use the full path
         )
     print(
         f"Rank {global_rank}: There are {sum(p.numel() for p in model.parameters())} parameters"
@@ -268,14 +274,15 @@ def train(local_rank, global_rank):
         if i % eval_interval == 0 or i == train_iters:
             losses = eval()
             valloss = losses["val"]
-            if global_rank == 0:
+            if local_rank == 0:
+                # local_rank since we're waiting anyways, we might as well print once per machine
                 print(
                     f"Iter: {i:>5}, Step Loss: {loss.item():.4f}, Validation Loss: {valloss:.4f}"
                 )
 
             if global_rank == 0:
-                print(f"Saving checkpoint at iter {i}...")
-                torch.save(raw_model.state_dict(), "latest_checkpoint.pth")
+                print(f"Saving checkpoint to {checkpoint_path} at iter {i}...")
+                torch.save(raw_model.state_dict(), checkpoint_path)  # Use the full path
 
     if global_rank == 0:
         print("Final generation:")
@@ -295,7 +302,25 @@ if __name__ == "__main__":
         global_rank = 0
         print("Running in non-distributed mode.")
 
-    train(local_rank, global_rank)
+    parser = argparse.ArgumentParser(description="Distributed Transformer Training")
+    parser.add_argument(
+        "--checkpoint_dir", type=str, default=".", help="Directory to save checkpoints"
+    )
+    parser.add_argument(
+        "--batch_size", type=int, default=256, help="Batch size per GPU"
+    )
+    parser.add_argument(
+        "--learning_rate", type=float, default=1e-2, help="Optimizer learning rate"
+    )
+    args = parser.parse_args()
+
+    train(
+        local_rank,
+        global_rank,
+        args.checkpoint_dir,
+        args.batch_size,
+        args.learning_rate,
+    )
 
     if is_initialized():
         destroy_process_group()

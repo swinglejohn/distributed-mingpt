@@ -21,11 +21,6 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 
 torch.manual_seed(1337)
 
-print()
-print(f"Cuda available: {torch.cuda.is_available()}")
-print(f"Using device: {device}")
-
-
 # Dummy variables to make Pylance happy :D
 train_dataset = None
 local_rank = -1
@@ -354,6 +349,11 @@ if __name__ == "__main__":
     assert n_embd % num_heads == 0, (
         f"n_embd ({n_embd}) must be divisible by num_heads ({num_heads})"
     )
+
+    if local_rank == 0:
+        print()
+        print(f"Cuda available: {torch.cuda.is_available()}")
+        print(f"Using device: {device}")
 
     # --- Call Train Function ---
     # Pass only the necessary args

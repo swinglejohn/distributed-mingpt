@@ -14,9 +14,9 @@ import argparse
 
 # Constants
 block_size = 500  # length of the Time dimension or context
-n_embd = 256
-num_heads = 16  # head_size is n_embed // num_heads
-n_layers = 12  # how many layers of multi headed attention + feedforward networks to use
+# n_embd = 128 # Keep commented out or remove, will be set by args
+# num_heads = 8  # Keep commented out or remove, will be set by args
+# n_layers = 10 # Keep commented out or remove, will be set by args
 drop_rate = 0.2  # dropout rate
 eval_iters = 200
 eval_interval = 500
@@ -38,6 +38,9 @@ global_rank = -1
 num_epochs = 100
 step_number = 0
 last_step = False
+n_embd = -1
+n_layers = -1
+num_heads = -1
 
 with open("shakespeare.txt", "r") as f:
     text = "".join(f.readlines())
@@ -148,9 +151,8 @@ class LanguageModel(nn.Module):
 
     def __call__(self, idx, targets=None):
         B, T = idx.shape
-        emb = self.C(
-            idx
-        )  # (B, T, C)  # where T can be less than block size (e.g. during generation)
+        emb = self.C(idx)
+        # (B, T, C)  # where T can be less than block size (e.g. during generation)
         pos = self.pos_table(torch.arange(T, device=device))
         x = emb + pos
         x = self.blocks(x)
@@ -206,20 +208,22 @@ def train(local_rank, global_rank, checkpoint_dir, batch_size, learning_rate, re
 
     # Only load if resume flag is set AND checkpoint exists
     if resume and os.path.exists(checkpoint_path):
-        print(f"Rank {global_rank}: Resuming training from checkpoint {checkpoint_path}...")
-        model.load_state_dict(
-            torch.load(checkpoint_path, map_location=map_location)
+        print(
+            f"Rank {global_rank}: Resuming training from checkpoint {checkpoint_path}..."
         )
+        model.load_state_dict(torch.load(checkpoint_path, map_location=map_location))
     elif resume:
         # If resume is True but checkpoint doesn't exist, print a warning (optional)
         if global_rank == 0:
-             print(f"Warning: --resume flag set, but checkpoint {checkpoint_path} not found. Starting from scratch.")
+            print(
+                f"Warning: --resume flag set, but checkpoint {checkpoint_path} not found. Starting from scratch."
+            )
     else:
         if global_rank == 0:
             print("Starting training from scratch (no --resume flag).")
 
     print(
-        f"Rank {global_rank}: There are {sum(p.numel() for p in model.parameters())} parameters"
+        f"Rank {global_rank}: Instantiated model with {sum(p.numel() for p in model.parameters())} parameters"
     )
     model.to(device)
 
@@ -301,6 +305,7 @@ def train(local_rank, global_rank, checkpoint_dir, batch_size, learning_rate, re
 
 
 if __name__ == "__main__":
+    # --- DDP Setup ---
     if "LOCAL_RANK" in os.environ and "RANK" in os.environ:
         local_rank = int(os.environ["LOCAL_RANK"])
         global_rank = int(os.environ["RANK"])
@@ -312,6 +317,7 @@ if __name__ == "__main__":
         global_rank = 0
         print("Running in non-distributed mode.")
 
+    # --- Argument Parsing ---
     parser = argparse.ArgumentParser(description="Distributed Transformer Training")
     parser.add_argument(
         "--checkpoint_dir", type=str, default=".", help="Directory to save checkpoints"
@@ -323,11 +329,31 @@ if __name__ == "__main__":
         "--learning_rate", type=float, default=1e-2, help="Optimizer learning rate"
     )
     parser.add_argument(
-        "--resume", action="store_true",
-        help="Resume training from the latest checkpoint in checkpoint_dir"
+        "--resume",
+        action="store_true",
+        help="Resume training from the latest checkpoint in checkpoint_dir",
+    )
+    parser.add_argument("--n_embd", type=int, default=128, help="Embedding dimension")
+    parser.add_argument(
+        "--n_layers", type=int, default=10, help="Number of transformer layers"
+    )
+    parser.add_argument(
+        "--num_heads", type=int, default=8, help="Number of attention heads"
     )
     args = parser.parse_args()
 
+    # --- Assign args to Global Variables ---
+    # This needs to happen *before* train() is called so model instantiation uses them
+    n_embd = args.n_embd
+    n_layers = args.n_layers
+    num_heads = args.num_heads
+    # Ensure n_embd is divisible by num_heads after parsing
+    assert n_embd % num_heads == 0, (
+        f"n_embd ({n_embd}) must be divisible by num_heads ({num_heads})"
+    )
+
+    # --- Call Train Function ---
+    # Pass only the necessary args
     train(
         local_rank,
         global_rank,

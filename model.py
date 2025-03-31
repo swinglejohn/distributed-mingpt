@@ -13,15 +13,15 @@ import argparse
 
 
 # Constants
-block_size = 26  # length of the Time dimension or context
-n_embd = 24
-num_heads = 4  # head_size is n_embed // num_heads
-n_layers = 6  # how many layers of multi headed attention + feedforward networks to use
+block_size = 500  # length of the Time dimension or context
+n_embd = 256
+num_heads = 16  # head_size is n_embed // num_heads
+n_layers = 12  # how many layers of multi headed attention + feedforward networks to use
 drop_rate = 0.2  # dropout rate
 eval_iters = 200
 eval_interval = 500
 sync_interval = 10
-train_iters = 6000
+train_iters = 4000
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 torch.manual_seed(1337)

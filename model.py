@@ -17,7 +17,6 @@ drop_rate = 0.2  # dropout rate
 eval_iters = 200
 eval_interval = 500
 sync_interval = 10
-train_iters = 4000
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 torch.manual_seed(1337)
@@ -37,7 +36,8 @@ last_step = False
 n_embd = -1
 n_layers = -1
 num_heads = -1
-block_size = -1 # Add dummy block_size
+block_size = -1
+train_iters = -1
 
 with open("shakespeare.txt", "r") as f:
     text = "".join(f.readlines())
@@ -320,25 +320,29 @@ if __name__ == "__main__":
         "--checkpoint_dir", type=str, default=".", help="Directory to save checkpoints"
     )
     parser.add_argument(
-        "--batch_size", type=int, default=256, help="Batch size per GPU"
-    )
-    parser.add_argument(
-        "--learning_rate", type=float, default=1e-2, help="Optimizer learning rate"
-    )
-    parser.add_argument(
         "--resume",
         action="store_true",
         help="Resume training from the latest checkpoint in checkpoint_dir",
     )
-    parser.add_argument("--n_embd", type=int, default=128, help="Embedding dimension")
+    parser.add_argument("--batch_size", type=int, default=20, help="Batch size per GPU")
     parser.add_argument(
-        "--n_layers", type=int, default=10, help="Number of transformer layers"
+        "--learning_rate", type=float, default=1e-3, help="Optimizer learning rate"
+    )
+    parser.add_argument("--n_embd", type=int, default=512, help="Embedding dimension")
+    parser.add_argument(
+        "--n_layers", type=int, default=16, help="Number of transformer layers"
     )
     parser.add_argument(
-        "--num_heads", type=int, default=8, help="Number of attention heads"
+        "--num_heads", type=int, default=16, help="Number of attention heads"
     )
     parser.add_argument(
         "--block_size", type=int, default=256, help="Context length (block size)"
+    )
+    parser.add_argument(
+        "--train_iters",
+        type=int,
+        default=4000,
+        help="Total number of training iterations",
     )
     args = parser.parse_args()
 
@@ -348,6 +352,7 @@ if __name__ == "__main__":
     n_layers = args.n_layers
     num_heads = args.num_heads
     block_size = args.block_size
+    train_iters = args.train_iters
     # Ensure n_embd is divisible by num_heads after parsing
     assert n_embd % num_heads == 0, (
         f"n_embd ({n_embd}) must be divisible by num_heads ({num_heads})"

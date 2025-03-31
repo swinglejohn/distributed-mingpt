@@ -13,10 +13,6 @@ import argparse
 
 
 # Constants
-block_size = 500  # length of the Time dimension or context
-# n_embd = 128 # Keep commented out or remove, will be set by args
-# num_heads = 8  # Keep commented out or remove, will be set by args
-# n_layers = 10 # Keep commented out or remove, will be set by args
 drop_rate = 0.2  # dropout rate
 eval_iters = 200
 eval_interval = 500
@@ -41,6 +37,7 @@ last_step = False
 n_embd = -1
 n_layers = -1
 num_heads = -1
+block_size = -1 # Add dummy block_size
 
 with open("shakespeare.txt", "r") as f:
     text = "".join(f.readlines())
@@ -340,6 +337,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--num_heads", type=int, default=8, help="Number of attention heads"
     )
+    parser.add_argument(
+        "--block_size", type=int, default=256, help="Context length (block size)"
+    )
     args = parser.parse_args()
 
     # --- Assign args to Global Variables ---
@@ -347,6 +347,7 @@ if __name__ == "__main__":
     n_embd = args.n_embd
     n_layers = args.n_layers
     num_heads = args.num_heads
+    block_size = args.block_size
     # Ensure n_embd is divisible by num_heads after parsing
     assert n_embd % num_heads == 0, (
         f"n_embd ({n_embd}) must be divisible by num_heads ({num_heads})"

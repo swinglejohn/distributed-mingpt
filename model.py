@@ -14,8 +14,8 @@ import argparse
 
 # Constants
 drop_rate = 0.2  # dropout rate
-eval_iters = 200
-eval_interval = 500
+eval_iters = 100
+eval_interval = 250
 sync_interval = 10
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -30,9 +30,6 @@ print(f"Using device: {device}")
 train_dataset = None
 local_rank = -1
 global_rank = -1
-num_epochs = 100
-step_number = 0
-last_step = False
 n_embd = -1
 n_layers = -1
 num_heads = -1

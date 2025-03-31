@@ -3,13 +3,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 # Distributed training
+from torch.utils.data import Dataset, DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from torch.nn.parallel import DistributedDataParallel
-from torch.distributed import init_process_group, destroy_process_group
+from torch.distributed import init_process_group, destroy_process_group, is_initialized
 
 import os
-import torch
-from torch.utils.data import Dataset, DataLoader, random_split
 
 
 # Constants
@@ -31,9 +30,6 @@ torch.manual_seed(1337)
 print()
 print(f"Cuda available: {torch.cuda.is_available()}")
 print(f"Using device: {device}")
-print(torch.__version__)
-print(f"Batch Size: {batch_size}")
-print()
 
 
 # Dummy variables to make Pylance happy :D
@@ -59,53 +55,22 @@ train_data = data[:n]
 val_data = data[n:]
 
 
-def get_batch(split="train"):
-    data = train_data if split == "train" else val_data
-    ixs = torch.randint(0, len(data) - block_size, (batch_size,))
-    # for i, ix in enumerate(ixs):
-    bx = torch.stack([data[ix : ix + block_size] for ix in ixs]).to(device)
-    by = torch.stack([data[ix + 1 : ix + block_size + 1] for ix in ixs]).to(device)
-    return bx, by
+# Create a Dataset
+class CharDataset(Dataset):
+    def __init__(self, data, block_size):
+        self.data = data
+        self.block_size = block_size
 
+    def __len__(self):
+        # Subtract block_size because we need block_size + 1 elements for x and y
+        return len(self.data) - self.block_size
 
-# single head of attention
-class SingleHead(nn.Module):
-    def __init__(self, head_size):
-        super().__init__()
-        self.keys = nn.Linear(n_embd, head_size, bias=False)
-        self.queries = nn.Linear(n_embd, head_size, bias=False)
-        self.values = nn.Linear(n_embd, head_size, bias=False)
-        self.register_buffer("tril", torch.tril(torch.ones(block_size, block_size)))
-        self.drop = nn.Dropout(drop_rate)
-
-    def __call__(self, x):
-        # x should be (B=batch_size, T=block_size, C=n_embd)
-        B, T, C = x.shape
-        k = self.keys(x)  # k should be (B, T, head_size)
-        q = self.queries(x)
-        v = self.values(x)
-
-        wei = q @ k.transpose(-1, -2) / (k.shape[-1] ** 0.5)  # yields (B, T, T)
-        wei = wei.masked_fill(self.tril[:T, :T] == 0, float("-inf"))
-        wei = wei.softmax(dim=-1)
-        wei = self.drop(wei)
-
-        out = wei @ v
-        return out
-
-
-class MultiHeadAttention(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.heads = nn.ModuleList(
-            SingleHead(n_embd // num_heads) for _ in range(num_heads)
-        )
-        self.proj = nn.Linear(n_embd, n_embd)
-        self.drop = nn.Dropout(drop_rate)
-
-    def __call__(self, x):
-        x = torch.cat([head(x) for head in self.heads], dim=-1)
-        return self.drop(self.proj(x))
+    def __getitem__(self, idx):
+        # Grab chunk of (block_size + 1) characters
+        chunk = self.data[idx : idx + self.block_size + 1]
+        x = chunk[:-1]
+        y = chunk[1:]
+        return x, y
 
 
 class SelfAttentionHeads(nn.Module):
@@ -213,70 +178,124 @@ class LanguageModel(nn.Module):
         return x
 
 
-def train():
+def train(local_rank, global_rank):
+    # Setup datasets and dataloaders
+    train_dataset = CharDataset(train_data, block_size)
+    val_dataset = CharDataset(val_data, block_size)
+
+    # Use DistributedSampler
+    train_sampler = DistributedSampler(train_dataset, shuffle=True)
+    val_sampler = DistributedSampler(val_dataset, shuffle=False)
+
+    # Use DataLoader
+    train_loader = DataLoader(
+        train_dataset, batch_size=batch_size, sampler=train_sampler, pin_memory=True
+    )
+    val_loader = DataLoader(
+        val_dataset, batch_size=batch_size, sampler=val_sampler, pin_memory=True
+    )
+
     model = LanguageModel()
+    map_location = {"cuda:%d" % 0: "cuda:%d" % local_rank}
     if os.path.exists("latest_checkpoint.pth"):  # Load latest checkpoint
-        # Also load optimizer state and other variables needed to restore the training state
-        model.load_state_dict(torch.load("latest_checkpoint.pth"))
-    print(f"There are {sum(p.numel() for p in model.parameters())} parameters")
+        print(f"Rank {global_rank}: Loading checkpoint...")
+        model.load_state_dict(
+            torch.load("latest_checkpoint.pth", map_location=map_location)
+        )
+    print(
+        f"Rank {global_rank}: There are {sum(p.numel() for p in model.parameters())} parameters"
+    )
     model.to(device)
 
-    model = DistributedDataParallel(model, device_ids=[local_rank])
+    if is_initialized():
+        model = DistributedDataParallel(model, device_ids=[local_rank])
+        raw_model = model.module
+    else:
+        raw_model = model
 
-    start = torch.zeros((1, 1), dtype=torch.long, device=device)
-    print(decode(model.generate(start, 50).view(-1)))
+    if global_rank == 0:
+        start = torch.zeros((1, 1), dtype=torch.long, device=device)
+        print("Initial generation:")
+        print(decode(raw_model.generate(start, 50).view(-1)))
 
-    adam = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+    adam = torch.optim.AdamW(raw_model.parameters(), lr=learning_rate)
 
     @torch.no_grad()
     def eval():
-        model.eval()
+        raw_model.eval()
         out = {}
-        for data_type in ["train", "val"]:
-            losses = torch.zeros(eval_iters)
-            for i in range(eval_iters):
-                bx, by = get_batch(data_type)
-                _, loss = model(bx, by)
-                losses[i] = loss.item()
-                out[data_type] = losses.mean()
-        model.train()
+        val_losses = torch.zeros(eval_iters)
+        val_iter = iter(val_loader)
+        for i in range(eval_iters):
+            try:
+                bx, by = next(val_iter)
+            except StopIteration:
+                val_sampler.set_epoch(i)
+                val_iter = iter(val_loader)
+                bx, by = next(val_iter)
+            bx, by = bx.to(device), by.to(device)
+            _, loss = model(bx, by)
+            val_losses[i] = loss.item()
+        out["val"] = val_losses.mean()
+        raw_model.train()
         return out
 
-    # training loop
+    train_iter = iter(train_loader)
     for i in range(train_iters + 1):
-        if i % sync_interval == 0:
-            bx, by = get_batch()
-            _, loss = model(bx, by)  # forward
-            loss.backward()  # Backward step + gradient SYNCHRONIZATION
-            adam.step()
-            model.zero_grad()
-        else:
+        if i % len(train_loader) == 0:
+            train_sampler.set_epoch(i // len(train_loader))
+
+        try:
+            bx, by = next(train_iter)
+        except StopIteration:
+            train_sampler.set_epoch((i // len(train_loader)) + 1)
+            train_iter = iter(train_loader)
+            bx, by = next(train_iter)
+
+        bx, by = bx.to(device), by.to(device)
+
+        is_sync_step = (i % sync_interval == 0) or (i == train_iters)
+        if is_initialized() and not is_sync_step:
             with model.no_sync():
-                bx, by = get_batch()
-                _, loss = model(bx, by)  # forward
-                loss.backward()  # Backward step + gradient ACCUMULATION
+                _, loss = model(bx, by)
+                loss.backward()
+        else:
+            _, loss = model(bx, by)
+            loss.backward()
+            adam.step()
+            adam.zero_grad()
 
-        if i % eval_interval == 0:
+        if i % eval_interval == 0 or i == train_iters:
             losses = eval()
-            valloss, traloss = losses["val"], losses["train"]
-            print(
-                f"Global Rank: {global_rank}, Iter: {i:>4}, Training Loss: {traloss:.4f}, Validation Loss: {valloss:.4f}"
-            )
+            valloss = losses["val"]
+            if global_rank == 0:
+                print(
+                    f"Iter: {i:>5}, Step Loss: {loss.item():.4f}, Validation Loss: {valloss:.4f}"
+                )
 
-        if global_rank == 0:  # Only save on rank 0
-            # Also save the optimizer state and other variables needed to restore the training state
-            torch.save(model.state_dict(), "latest_checkpoint.pth")
+            if global_rank == 0:
+                print(f"Saving checkpoint at iter {i}...")
+                torch.save(raw_model.state_dict(), "latest_checkpoint.pth")
 
-    print(decode(model.generate(start, 500).view(-1)))
+    if global_rank == 0:
+        print("Final generation:")
+        start = torch.zeros((1, 1), dtype=torch.long, device=device)
+        print(decode(raw_model.generate(start, 500).view(-1)))
 
 
 if __name__ == "__main__":
-    local_rank = int(os.environ["LOCAL_RANK"])
-    global_rank = int(os.environ["RANK"])
+    if "LOCAL_RANK" in os.environ and "RANK" in os.environ:
+        local_rank = int(os.environ["LOCAL_RANK"])
+        global_rank = int(os.environ["RANK"])
+        init_process_group(backend="nccl")
+        torch.cuda.set_device(local_rank)
+        print(f"Initializing DDP: Global Rank {global_rank}, Local Rank {local_rank}")
+    else:
+        local_rank = 0
+        global_rank = 0
+        print("Running in non-distributed mode.")
 
-    init_process_group(backend="nccl")
-    torch.cuda.set_device(local_rank)  # Set the device to local rank
+    train(local_rank, global_rank)
 
-    train()
-
-    destroy_process_group()
+    if is_initialized():
+        destroy_process_group()

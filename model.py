@@ -177,7 +177,7 @@ class LanguageModel(nn.Module):
         return x
 
 
-def train(local_rank, global_rank, checkpoint_dir, batch_size, learning_rate):
+def train(local_rank, global_rank, checkpoint_dir, batch_size, learning_rate, resume):
     # Ensure the checkpoint directory exists (only rank 0 needs to create it)
     if global_rank == 0 and not os.path.exists(checkpoint_dir):
         os.makedirs(checkpoint_dir)
@@ -203,11 +203,21 @@ def train(local_rank, global_rank, checkpoint_dir, batch_size, learning_rate):
 
     model = LanguageModel()
     map_location = {"cuda:%d" % 0: "cuda:%d" % local_rank}
-    if os.path.exists(checkpoint_path):  # Use the full path
-        print(f"Rank {global_rank}: Loading checkpoint from {checkpoint_path}...")
+
+    # Only load if resume flag is set AND checkpoint exists
+    if resume and os.path.exists(checkpoint_path):
+        print(f"Rank {global_rank}: Resuming training from checkpoint {checkpoint_path}...")
         model.load_state_dict(
-            torch.load(checkpoint_path, map_location=map_location)  # Use the full path
+            torch.load(checkpoint_path, map_location=map_location)
         )
+    elif resume:
+        # If resume is True but checkpoint doesn't exist, print a warning (optional)
+        if global_rank == 0:
+             print(f"Warning: --resume flag set, but checkpoint {checkpoint_path} not found. Starting from scratch.")
+    else:
+        if global_rank == 0:
+            print("Starting training from scratch (no --resume flag).")
+
     print(
         f"Rank {global_rank}: There are {sum(p.numel() for p in model.parameters())} parameters"
     )
@@ -312,6 +322,10 @@ if __name__ == "__main__":
     parser.add_argument(
         "--learning_rate", type=float, default=1e-2, help="Optimizer learning rate"
     )
+    parser.add_argument(
+        "--resume", action="store_true",
+        help="Resume training from the latest checkpoint in checkpoint_dir"
+    )
     args = parser.parse_args()
 
     train(
@@ -320,6 +334,7 @@ if __name__ == "__main__":
         args.checkpoint_dir,
         args.batch_size,
         args.learning_rate,
+        args.resume,
     )
 
     if is_initialized():

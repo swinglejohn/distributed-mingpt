@@ -169,22 +169,17 @@ class LanguageModel(nn.Module):
 
 
 def train(local_rank, global_rank, checkpoint_dir, batch_size, learning_rate, resume):
-    # Ensure the checkpoint directory exists (only rank 0 needs to create it)
     if global_rank == 0 and not os.path.exists(checkpoint_dir):
         os.makedirs(checkpoint_dir)
 
-    # Construct the full checkpoint path
     checkpoint_path = os.path.join(checkpoint_dir, "latest_checkpoint.pth")
 
-    # Setup datasets and dataloaders
     train_dataset = CharDataset(train_data, block_size)
     val_dataset = CharDataset(val_data, block_size)
 
-    # Use DistributedSampler
     train_sampler = DistributedSampler(train_dataset, shuffle=True)
     val_sampler = DistributedSampler(val_dataset, shuffle=False)
 
-    # Use DataLoader with the passed batch_size
     train_loader = DataLoader(
         train_dataset, batch_size=batch_size, sampler=train_sampler, pin_memory=True
     )
@@ -195,14 +190,12 @@ def train(local_rank, global_rank, checkpoint_dir, batch_size, learning_rate, re
     model = LanguageModel()
     map_location = {"cuda:%d" % 0: "cuda:%d" % local_rank}
 
-    # Only load if resume flag is set AND checkpoint exists
     if resume and os.path.exists(checkpoint_path):
         print(
             f"Rank {global_rank}: Resuming training from checkpoint {checkpoint_path}..."
         )
         model.load_state_dict(torch.load(checkpoint_path, map_location=map_location))
     elif resume:
-        # If resume is True but checkpoint doesn't exist, print a warning (optional)
         if global_rank == 0:
             print(
                 f"Warning: --resume flag set, but checkpoint {checkpoint_path} not found. Starting from scratch."
@@ -285,7 +278,7 @@ def train(local_rank, global_rank, checkpoint_dir, batch_size, learning_rate, re
 
             if global_rank == 0:
                 print(f"Saving checkpoint to {checkpoint_path} at iter {i}...")
-                torch.save(raw_model.state_dict(), checkpoint_path)  # Use the full path
+                torch.save(raw_model.state_dict(), checkpoint_path)
 
     if global_rank == 0:
         print("Final generation:")
@@ -355,8 +348,6 @@ if __name__ == "__main__":
         print(f"Cuda available: {torch.cuda.is_available()}")
         print(f"Using device: {device}")
 
-    # --- Call Train Function ---
-    # Pass only the necessary args
     train(
         local_rank,
         global_rank,
